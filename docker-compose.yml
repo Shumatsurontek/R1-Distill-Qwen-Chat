@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  vllm:
+    image: vllm/vllm:latest
+    command: ["serve", "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"]
+    ports:
+      - "8000:8000"
+    restart: always
+
+  chat-app:
+    build: .
+    ports:
+      - "8501:8501"
+    depends_on:
+      - vllm
+    restart: always
