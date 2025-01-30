@@ -1,11 +1,16 @@
-version: "3.8"
-
 services:
   vllm:
-    image: vllm/vllm:latest
-    command: ["serve", "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"]
+    build:
+      context: .
+      dockerfile: Dockerfile.vllm
     ports:
       - "8000:8000"
+    restart: always
+
+  qdrant:
+    image: qdrant/qdrant
+    ports:
+      - "6333:6333"
     restart: always
 
   chat-app:
@@ -14,4 +19,5 @@ services:
       - "8501:8501"
     depends_on:
       - vllm
+      - qdrant
     restart: always
