@@ -1,10 +1,21 @@
-FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
+FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
+
+# Variables d'environnement CUDA en premier
+ENV CUDA_VISIBLE_DEVICES=0
+ENV NVIDIA_VISIBLE_DEVICES=0
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 # Installer les dépendances de base
-RUN apt update && apt install -y python3 python3-pip git
+RUN apt update && apt install -y python3 python3-pip git curl
 
-# Installer vLLM
-RUN pip install vllm
+# Installer PyTorch et vLLM avec les versions compatibles CUDA 12.1
+RUN pip install --no-cache-dir \
+    torch==2.5.1 \
+    torchvision==0.20.1 \
+    torchaudio==2.5.1 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+RUN pip install --no-cache-dir vllm==0.7.0
 
 # Télécharger le modèle
 RUN mkdir -p /models && pip install huggingface_hub && \
@@ -13,8 +24,16 @@ RUN mkdir -p /models && pip install huggingface_hub && \
 # Exposer le port
 EXPOSE 8000
 
-# Définir le point d'entrée
+# Vérifier CUDA
+RUN python3 -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('CUDA version:', torch.version.cuda); print('Device count:', torch.cuda.device_count())"
+
+# Définir le point d'entrée avec des paramètres optimisés pour RTX 4070
 CMD ["python3", "-m", "vllm.entrypoints.openai.api_server", \
      "--model", "/models", \
      "--host", "0.0.0.0", \
-     "--port", "8000"]
+     "--port", "8000", \
+     "--gpu-memory-utilization", "0.85", \
+     "--max-num-batched-tokens", "8192", \
+     "--tensor-parallel-size", "1", \
+     "--max-model-len", "4096", \
+     "--dtype", "bfloat16"]

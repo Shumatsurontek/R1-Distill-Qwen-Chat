@@ -7,6 +7,9 @@ services:
       dockerfile: Dockerfile.vllm
     ports:
       - "8000:8000"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     deploy:
       resources:
         reservations:
@@ -14,8 +17,16 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    runtime: nvidia
+    shm_size: '8gb'
     networks:
       - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   qdrant:
     image: qdrant/qdrant
@@ -25,6 +36,11 @@ services:
       - qdrant_data:/qdrant/storage
     networks:
       - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   chat-app:
     build: .
@@ -35,8 +51,10 @@ services:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
     depends_on:
-      - vllm
-      - qdrant
+      vllm:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
     networks:
       - app-network
 

@@ -8,6 +8,7 @@ from sentence_transformers import SentenceTransformer
 from typing import List
 import uuid
 import os
+import time
 
 # ---------------------------- CONFIGURATION ----------------------------
 
@@ -24,23 +25,56 @@ st.set_page_config(
 
 # ---------------------------- INIT QDRANT ----------------------------
 
-qdrant = QdrantClient(QDRANT_HOST, port=QDRANT_PORT)
-COLLECTION_NAME = "knowledge_base"
+def init_qdrant():
+    """Initialise la connexion Qdrant et crée la collection si nécessaire"""
+    retries = 5
+    while retries > 0:
+        try:
+            api_key = os.getenv("QDRANT_API_KEY")
+            qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
+            
+            client = QdrantClient(
+                url=qdrant_url,
+                api_key=api_key
+            )
+            
+            collections = client.get_collections().collections
+            exists = any(col.name == "knowledge_base" for col in collections)
+            
+            if not exists:
+                client.create_collection(
+                    collection_name="knowledge_base",
+                    vectors_config=VectorParams(size=384, distance=Distance.COSINE)
+                )
+                st.success("✅ Collection créée avec succès!")
+            else:
+                st.info("ℹ️ Collection existante utilisée")
+            
+            return client
+        except Exception as e:
+            retries -= 1
+            if retries == 0:
+                st.error(f"❌ Erreur de connexion à Qdrant après plusieurs tentatives: {str(e)}")
+                raise e
+            time.sleep(2)
 
-# Initialiser Sentence-Transformers pour générer les embeddings
-embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-
-# Vérifier si la collection existe, sinon la créer
-try:
-    qdrant.get_collection(COLLECTION_NAME)
-except Exception as e:
-    try:
-        qdrant.create_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(size=384, distance=Distance.COSINE)
-        )
-    except Exception as e:
-        st.error(f"Erreur lors de la création de la collection: {str(e)}")
+def init_vllm_client():
+    """Initialise la connexion vLLM avec retry"""
+    retries = 5
+    while retries > 0:
+        try:
+            # Test de connexion
+            response = requests.get(f"{VLLM_URL.rsplit('/', 1)[0]}/health")
+            if response.status_code == 200:
+                return
+            raise Exception(f"Status code: {response.status_code}")
+        except Exception as e:
+            retries -= 1
+            if retries == 0:
+                st.error(f"❌ Impossible de se connecter à vLLM après plusieurs tentatives: {str(e)}")
+                raise e
+            st.warning(f"⚠️ Tentative de connexion à vLLM ({retries} essais restants)...")
+            time.sleep(5)  # Attendre plus longtemps pour vLLM
 
 # ---------------------------- WEB SCRAPING ----------------------------
 
@@ -167,12 +201,23 @@ def chat_interface():
 # ---------------------------- MAIN APP ----------------------------
 
 def main():
-    sidebar()
-    chat_interface()
-    
-    # Apply theme
-    theme = dark_theme_css if st.session_state["dark_mode"] else light_theme_css
-    st.markdown(theme, unsafe_allow_html=True)
+    try:
+        # Initialiser les connexions
+        global qdrant
+        qdrant = init_qdrant()
+        init_vllm_client()
+        
+        # Afficher l'interface
+        sidebar()
+        chat_interface()
+        
+        # Appliquer le thème
+        theme = dark_theme_css if st.session_state["dark_mode"] else light_theme_css
+        st.markdown(theme, unsafe_allow_html=True)
+        
+    except Exception as e:
+        st.error(f"❌ Erreur d'initialisation: {str(e)}")
+        st.info("🔄 Rechargez la page dans quelques instants...")
 
 # ---------------------------- UTILITY FUNCTIONS ----------------------------
 
