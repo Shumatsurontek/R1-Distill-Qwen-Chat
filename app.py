@@ -1,13 +1,19 @@
 import streamlit as st
 import requests
 import re
+from bs4 import BeautifulSoup
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from sentence_transformers import SentenceTransformer
+from typing import List
+import uuid
+import os
 
 # ---------------------------- CONFIGURATION ----------------------------
 
-VLLM_URL = "http://localhost:8000/v1/chat/completions"
+VLLM_URL = os.getenv("VLLM_URL", "http://localhost:8000/v1/chat/completions")
+QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
+QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
 MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 
 st.set_page_config(
@@ -18,7 +24,7 @@ st.set_page_config(
 
 # ---------------------------- INIT QDRANT ----------------------------
 
-qdrant = QdrantClient("localhost", port=6333)
+qdrant = QdrantClient(QDRANT_HOST, port=QDRANT_PORT)
 COLLECTION_NAME = "knowledge_base"
 
 # Initialiser Sentence-Transformers pour générer les embeddings
@@ -27,28 +33,151 @@ embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 # Vérifier si la collection existe, sinon la créer
 try:
     qdrant.get_collection(COLLECTION_NAME)
-except:
-    qdrant.create_collection(
-        COLLECTION_NAME,
-        vectors_config=VectorParams(size=384, distance=Distance.COSINE)
-    )
+except Exception as e:
+    try:
+        qdrant.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=384, distance=Distance.COSINE)
+        )
+    except Exception as e:
+        st.error(f"Erreur lors de la création de la collection: {str(e)}")
 
-# ---------------------------- MODE SOMBRE ----------------------------
+# ---------------------------- WEB SCRAPING ----------------------------
 
-if "dark_mode" not in st.session_state:
-    st.session_state["dark_mode"] = False
+def scrape_website(url: str) -> List[str]:
+    """Scrape content from a website and split it into chunks."""
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Remove script and style elements
+        for script in soup(["script", "style"]):
+            script.decompose()
+            
+        # Get text and split into paragraphs
+        text = soup.get_text()
+        chunks = [chunk.strip() for chunk in text.split('\n') if chunk.strip()]
+        
+        # Filter out short chunks and combine into reasonable sizes
+        meaningful_chunks = []
+        current_chunk = ""
+        
+        for chunk in chunks:
+            if len(current_chunk) + len(chunk) < 1000:
+                current_chunk += " " + chunk
+            else:
+                if current_chunk:
+                    meaningful_chunks.append(current_chunk.strip())
+                current_chunk = chunk
+                
+        if current_chunk:
+            meaningful_chunks.append(current_chunk.strip())
+            
+        return meaningful_chunks
+        
+    except Exception as e:
+        st.error(f"Error scraping website: {str(e)}")
+        return []
 
-if st.button("🌙 Mode sombre" if not st.session_state["dark_mode"] else "☀️ Mode clair"):
-    st.session_state["dark_mode"] = not st.session_state["dark_mode"]
-    st.rerun()
+# ---------------------------- UI COMPONENTS ----------------------------
 
-light_theme_css = """<style> body { background-color: white; color: black; } </style>"""
-dark_theme_css = """<style> body { background-color: #1e1e1e; color: white; } </style>"""
-st.markdown(dark_theme_css if st.session_state["dark_mode"] else light_theme_css, unsafe_allow_html=True)
+def sidebar():
+    with st.sidebar:
+        st.title("⚙️ Configuration")
+        
+        # Dark mode toggle
+        if "dark_mode" not in st.session_state:
+            st.session_state["dark_mode"] = False
+        
+        if st.toggle("🌙 Mode sombre", st.session_state["dark_mode"]):
+            st.session_state["dark_mode"] = not st.session_state["dark_mode"]
+            st.rerun()
+            
+        # Knowledge Base Management
+        st.subheader("📚 Base de connaissances")
+        
+        # Add single document
+        with st.expander("📄 Ajouter un document"):
+            doc_text = st.text_area("Contenu du document")
+            if st.button("📥 Ajouter le document"):
+                if doc_text:
+                    add_document(doc_text)
+                    st.success("Document ajouté avec succès!")
+                    
+        # Web scraping
+        with st.expander("🌐 Scraper un site web"):
+            url = st.text_input("URL du site web")
+            if st.button("🔍 Scraper et ajouter"):
+                if url:
+                    with st.spinner("Scraping en cours..."):
+                        chunks = scrape_website(url)
+                        for chunk in chunks:
+                            add_document(chunk)
+                        st.success(f"✅ {len(chunks)} segments ajoutés à la base de connaissances!")
 
-# ---------------------------- FONCTIONS ----------------------------
+# ---------------------------- CHAT INTERFACE ----------------------------
+
+def chat_interface():
+    st.title("🤖 DeepSeek-R1 Chat avec RAG")
+    
+    # Initialize chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {"role": "system", "content": "Je suis une IA assistante utile et bienveillante."}
+        ]
+    
+    # Chat reset button
+    col1, col2 = st.columns([6, 1])
+    with col2:
+        if st.button("🔄 Reset"):
+            st.session_state.messages = [
+                {"role": "system", "content": "Je suis une IA assistante utile et bienveillante."}
+            ]
+            st.rerun()
+    
+    # Display chat messages
+    for msg in st.session_state.messages[1:]:  # Skip system message
+        with st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖"):
+            st.write(msg["content"])
+    
+    # Chat input
+    if prompt := st.chat_input("Posez votre question..."):
+        # Search relevant documents
+        docs = search_documents(prompt)
+        context = "\n\n".join(docs) if docs else "Aucun document pertinent trouvé."
+        
+        # Prepare query with context
+        query = f"Contexte:\n{context}\n\nQuestion: {prompt}"
+        
+        # Add user message and get response
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        
+        with st.chat_message("assistant", avatar="🤖"):
+            with st.spinner("🤔 Réflexion..."):
+                response = query_vllm(st.session_state.messages[-2:])  # Send last 2 messages
+                
+            if response and "choices" in response:
+                answer = clean_response(response["choices"][0]["message"]["content"])
+                st.session_state.messages.append({"role": "assistant", "content": answer})
+                st.write(answer)
+            else:
+                st.error("❌ Erreur: Pas de réponse du modèle.")
+
+# ---------------------------- MAIN APP ----------------------------
+
+def main():
+    sidebar()
+    chat_interface()
+    
+    # Apply theme
+    theme = dark_theme_css if st.session_state["dark_mode"] else light_theme_css
+    st.markdown(theme, unsafe_allow_html=True)
+
+# ---------------------------- UTILITY FUNCTIONS ----------------------------
 
 def clean_response(text):
+    """Nettoie la réponse du modèle."""
     text = re.sub(r"<.*?>", "", text)
     text = re.sub(r"[^a-zA-ZÀ-ÿ0-9.,!?()€$£% ]", "", text)
     return text.strip()
@@ -75,72 +204,17 @@ def add_document(text):
 
 def search_documents(query):
     """Recherche les documents pertinents dans Qdrant."""
-    vector = embedding_model.encode(query).tolist()  # Fonction qui transforme le texte en vecteur
-
+    vector = embedding_model.encode(query).tolist()
     search_result = qdrant.search(
         collection_name=COLLECTION_NAME,
-        query_vector=vector,  # ✅ `query_vector` fonctionne ici
-        limit=3  # Nombre de résultats
+        query_vector=vector,
+        limit=3
     )
+    return [hit.payload["text"] for hit in search_result]
 
-    # Extraction du texte des documents
-    docs = [hit.payload["text"] for hit in search_result]
+# Définition des styles pour le mode sombre/clair
+light_theme_css = """<style> body { background-color: white; color: black; } </style>"""
+dark_theme_css = """<style> body { background-color: #1e1e1e; color: white; } </style>"""
 
-    return docs
-
-
-# ---------------------------- HEADER ----------------------------
-
-st.title("🤖 DeepSeek-R1 Chat avec RAG")
-st.markdown("💬 **Posez vos questions et obtenez des réponses augmentées par la récupération de documents.**")
-
-# ---------------------------- GESTION DU CHAT ----------------------------
-
-if st.button("🔄 Réinitialiser la conversation"):
-    st.session_state.messages = [{"role": "system", "content": "Posez une question !"}]
-    st.rerun()
-
-if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "system", "content": "Tu es une IA utile et bienveillante."}]
-
-# Ajout de documents (interface admin)
-if st.checkbox("📄 Ajouter un document à la base de connaissances"):
-    doc_text = st.text_area("Ajoutez du contenu textuel pour l'enrichir dans Qdrant")
-    if st.button("📥 Ajouter"):
-        add_document(doc_text)
-        st.success("Document ajouté !")
-
-# Affichage des messages
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖"):
-        st.write(msg["content"])
-
-# Entrée utilisateur
-user_input = st.chat_input("Posez votre question ici...")
-
-if user_input:
-    # Recherche des documents pertinents
-    retrieved_docs = search_documents(user_input)
-
-    # Création du contexte à injecter
-    context = "\n\n".join(retrieved_docs) if retrieved_docs else "Aucun document trouvé."
-
-    # Ajout du message utilisateur avec le contexte
-    query = f"Contexte:\n{context}\n\nQuestion: {user_input}"
-
-    st.session_state.messages.append({"role": "user", "content": query})
-
-    with st.chat_message("user", avatar="👤"):
-        st.write(user_input)
-
-    # Réponse du modèle
-    with st.chat_message("assistant", avatar="🤖"):
-        with st.spinner("🤔 Réflexion en cours..."):
-            response = query_vllm(st.session_state.messages)
-
-        if response and "choices" in response:
-            answer = clean_response(response["choices"][0]["message"]["content"])
-            st.session_state.messages.append({"role": "assistant", "content": answer})
-            st.write(answer)
-        else:
-            st.error("❌ Erreur : aucune réponse reçue du modèle.")
+if __name__ == "__main__":
+    main()
